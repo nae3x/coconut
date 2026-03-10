@@ -1097,6 +1097,103 @@ class TestCompilation(unittest.TestCase):
                     run(manage_cache=False)
                     run(["--force"], manage_cache=False)
 
+    def test_strict_unreachable_code_error(self):
+        """--strict should raise an error for code after return."""
+        call_coconut(
+            ["--strict", "-c", "def f():\n    return 1\n    x = 2\n"],
+            expect_retcode=1,
+            check_errors=False,
+            assert_output="found unreachable code after return statement",
+            assert_output_only_at_end=False,
+        )
+
+    def test_strict_unreachable_code_warning(self):
+        """Without --strict, unreachable code after return should warn but not fail."""
+        call_coconut(
+            ["-c", "def f():\n    return 1\n    x = 2\n"],
+            check_errors=False,
+            assert_output="found unreachable code after return statement",
+            assert_output_only_at_end=False,
+        )
+
+    # -- Positive tests: unreachable code SHOULD be detected --
+
+    def test_strict_unreachable_code_raise(self):
+        """raise is a terminator; code after it should be detected as unreachable."""
+        call_coconut(
+            ["--strict", "-c", "def f():\n    raise ValueError\n    x = 2\n"],
+            expect_retcode=1,
+            check_errors=False,
+            assert_output="after raise statement",
+            assert_output_only_at_end=False,
+        )
+
+    def test_strict_unreachable_code_raise_with_arg(self):
+        """raise with an argument should still be detected as a terminator."""
+        call_coconut(
+            ["--strict", "-c", "def f():\n    raise Exception('msg')\n    x = 2\n"],
+            expect_retcode=1,
+            check_errors=False,
+            assert_output="after raise statement",
+            assert_output_only_at_end=False,
+        )
+
+    # -- Negative tests: unreachable code should NOT be detected --
+
+    def test_strict_unreachable_code_nested_def(self):
+        """return inside a nested def should not trigger detection in outer function."""
+        call_coconut(
+            ["--strict", "-c", "def f():\n    def g():\n        return 1\n    x = 2\n"],
+        )
+
+    def test_strict_unreachable_code_for_loop(self):
+        """return inside a for loop should not trigger detection after the loop."""
+        call_coconut(
+            ["--strict", "-c", "def f():\n    for i in range(10):\n        return i\n    x = 2\n"],
+        )
+
+    def test_strict_unreachable_code_while_loop(self):
+        """return inside a while loop should not trigger detection after the loop."""
+        call_coconut(
+            ["--strict", "-c", "def f():\n    while True:\n        return 1\n    x = 2\n"],
+        )
+
+    def test_strict_unreachable_code_try_block(self):
+        """return inside a try block should not trigger detection after the block."""
+        call_coconut(
+            ["--strict", "-c", "def f():\n    try:\n        return 1\n    except:\n        pass\n    x = 2\n"],
+        )
+
+    def test_strict_unreachable_code_with_block(self):
+        """return inside a with block should not trigger detection after the block."""
+        call_coconut(
+            ["--strict", "-c", "def f(ctx):\n    with ctx:\n        return 1\n    x = 2\n"],
+        )
+
+    def test_strict_unreachable_code_if_no_else(self):
+        """return inside an if (no else) should not trigger detection after the if."""
+        call_coconut(
+            ["--strict", "-c", "def f():\n    if True:\n        return 1\n    x = 2\n"],
+        )
+
+    def test_strict_unreachable_code_if_else_all_return(self):
+        """return in all branches of if/else is not detected (no branch analysis)."""
+        call_coconut(
+            ["--strict", "-c", "def f():\n    if True:\n        return 1\n    else:\n        return 2\n    x = 3\n"],
+        )
+
+    def test_strict_unreachable_code_return_only(self):
+        """A function ending with return (no code after) should not trigger detection."""
+        call_coconut(
+            ["--strict", "-c", "def f():\n    return 1\n"],
+        )
+
+    def test_strict_unreachable_code_empty_function(self):
+        """pass is not a terminator; a pass-only function should not trigger detection."""
+        call_coconut(
+            ["--strict", "-c", "def f():\n    pass\n"],
+        )
+
     if get_bool_env_var("COCONUT_TEST_VERBOSE"):
         def test_verbose(self):
             run(["--jobs", "0", "--verbose"])
