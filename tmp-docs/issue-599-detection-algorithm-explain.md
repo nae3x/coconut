@@ -32,7 +32,101 @@ Conceptually, the three body lines look like:
 
 ---
 
+## The Four State Variables
+
+These four variables are the entire state machine. At any point during the loop, they
+collectively answer the question: "should this line trigger an error, and are we in a
+position where triggering would be correct?"
+
+---
+
+### `level` — current indentation depth
+
+Starts at 0 (before entering the function body). Incremented by each `<INDENT>` marker,
+decremented by each `<DEDENT>`. The gate only fires at `level == 1`, which corresponds
+to statements written directly in the function body — not inside any nested block.
+
+---
+
+### `disabled_until_level` — gate suppression tracker
+
+The variable the **gate actually checks** (`disabled_until_level is None`). While it is
+not `None`, no unreachable-code analysis runs at all — the gate is skipped entirely.
+
+Set to `level` when entering any of:
+- a nested `def` or `class` (via `def_regex`)
+- a `for`, `while`, `try`, or `with` block (via `tco_disable_regex`)
+
+Cleared when `level` drops back to or below `disabled_until_level` (i.e., when we
+exit the suppressed block).
+
+**Why it is needed**: a `return` inside a loop body or nested function is not
+unconditional — the loop may not execute, and the nested function's `return` belongs
+to that function, not the outer one. Suppressing the gate for these blocks prevents
+false positives.
+
+---
+
+### `func_until_level` — nested-def boundary tracker
+
+Set to `level` whenever a nested `def` is seen, alongside `disabled_until_level`.
+Cleared when `level` drops back to or below `func_until_level`.
+
+**Why it is needed** — it exists solely to prevent a nested `def` *inside an already-
+suppressed block* from overwriting `disabled_until_level` with a deeper (wrong) level.
+
+Without it, consider:
+
+```python
+def f():
+    def g():        # func_until_level = 1, disabled_until_level = 1
+        def h():    # without func_until_level guard:
+            pass    #   disabled_until_level = 2  ← WRONG (overwrites 1)
+    x = 2           # disabled_until_level clears at 2, not 1
+                    # → x = 2 is still suppressed → false negative
+```
+
+The `def` entry check uses `func_until_level is None` as its outer guard. Once we are
+already inside a nested `def`, this guard blocks any further `def` from touching
+`disabled_until_level`. Loops do not need their own equivalent tracker because their
+entry check already uses `disabled_until_level is None` as its guard, which is already
+false inside any suppressed block.
+
+---
+
+### `last_terminator` — pending terminator
+
+Either `None` or a `(keyword_str, source_line_num)` tuple, e.g. `("return", 3)`.
+
+- Set when the gate sees a `return`, `raise`, `break`, or `continue`.
+- Triggers an error when the **next** line passes through the gate while it is non-`None`.
+- Reset to `None` immediately after an error fires (one error per terminator).
+- Also reset to `None` by any ordinary (non-terminator) statement, because an ordinary
+  statement means the flow is no longer unconditionally terminated.
+
+The line number stored is the **terminator's** source line, not the unreachable line's,
+so the error message points back to the statement that caused the problem.
+
+---
+
 ## Initial State
+
+### The function
+
+```python
+def func():
+    do_stuff()
+    return 1
+    do_more_stuff()  # ← should be flagged as unreachable
+```
+### The raw lines
+| # | Internal line (simplified) | Indent marker | Body | Dedent marker |
+|---|---------------------------|---------------|------|---------------|
+| 1 | `<INDENT>do_stuff()` | `<INDENT>` (+1) | `do_stuff()` | — |
+| 2 | `return 1 # 3` | — | `return 1` | — |
+| 3 | `do_more_stuff()<DEDENT> # 4` | — | `do_more_stuff()` | `<DEDENT>` (−1) |
+
+### The states
 
 ```
 level               = 0
@@ -186,6 +280,71 @@ for each line in raw_lines:
     │
 level += ind_change(dedent)             ← adjust depth for trailing dedent markers
 ```
+
+---
+
+## The Three Gate Conditions
+
+The gate is:
+
+```python
+if level == 1 and disabled_until_level is None and base and not is_blank(line):
+```
+
+All three conditions must be true. Here is why each one is necessary.
+
+---
+
+### Condition 1: `level == 1`
+
+**What it means**: only analyze statements that are direct children of the function body.
+
+**Why it is needed**: a terminator at a deeper level is conditional. For example, a
+`return` inside an `if`-branch is only executed when that branch is taken — code after
+the `if` block is still reachable. The detector does not do branch analysis, so it
+simply ignores everything below level 1.
+
+**What happens without it**: the detector would see `return` inside an `if`-branch at
+level 2 and arm `last_terminator`. The next statement at level 1 would then be
+incorrectly flagged as unreachable even though the `if` might not have been taken.
+
+---
+
+### Condition 2: `disabled_until_level is None`
+
+**What it means**: only analyze when not inside a suppressed block (`def`, `for`,
+`while`, `try`, `with`).
+
+**Why it is needed**: these blocks introduce control flow that makes a terminator inside
+them non-unconditional. A `return` inside a `for` loop only executes on some iterations;
+a `return` inside a nested `def` belongs to that function entirely.
+
+**What happens without it**: the detector would see `return i` inside a `for` loop and
+arm `last_terminator`. The statement after the loop would be falsely flagged as
+unreachable, even though the loop might run zero iterations.
+
+Note that `level == 1` alone is not sufficient here. The `for` header line itself
+(`for i in ...:`) is at level 1, so it passes condition 1. The scope-entry check
+(setting `disabled_until_level`) happens in step 3, before the gate in step 4. So
+`for i in ...:` correctly sets `disabled_until_level` first, and then condition 2
+blocks the gate on that same line. Without condition 2, the gate would open even
+while `disabled_until_level` is set — making the suppression mechanism useless.
+
+---
+
+### Condition 3: `base and not is_blank(line)`
+
+**What it means**: skip blank lines and comment-only lines.
+
+**Why it is needed**: blank lines and comments are not executable statements. A blank
+line between a `return` and the next real statement should neither reset
+`last_terminator` to `None` (hiding the unreachable code) nor falsely trigger an error.
+
+**What happens without it**: a blank line after `return` would enter the gate, find
+`last_terminator` set, and fire an error pointing at the blank line instead of the
+actual unreachable statement. Or if it matched no terminator, it would reset
+`last_terminator` to `None` and the real unreachable statement after it would go
+undetected.
 
 ---
 
