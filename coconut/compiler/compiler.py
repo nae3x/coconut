@@ -2649,15 +2649,19 @@ else:
             # only analyze at top level of function body, outside suppressed scopes
             if level == 1 and disabled_until_level is None and base and not is_blank(line):
                 if last_terminator is not None:
-                    term_kwd, term_ln = last_terminator
-                    self.strict_err_or_warn(
-                        "found unreachable code after " + term_kwd + " statement",
-                        original,
-                        loc,
-                        ln=term_ln,
-                        noqa_able=False,
-                        endpoint=False,
-                    )
+                    # skip compiler-generated code (e.g. `if False: yield` from `yield def`)
+                    # which has no source line number comment
+                    raw_ln = extract_line_num_from_comment(comment)
+                    if raw_ln is not None:
+                        term_kwd, term_ln = last_terminator
+                        self.strict_err_or_warn(
+                            "found unreachable code after " + term_kwd + " statement",
+                            original,
+                            loc,
+                            ln=term_ln,
+                            noqa_able=False,
+                            endpoint=False,
+                        )
                     last_terminator = None
 
                 m = self.terminator_stmt_regex.match(base)
@@ -5318,18 +5322,14 @@ async with {iter_item} as {temp_var}:
         keywords, funcdef = tokens
         for kwd in keywords:
             if kwd == "yield":
-                if_false_yield = handle_indentation(
+                funcdef += handle_indentation(
                     """
 if False:
     yield
                     """,
                     add_newline=True,
+                    extra_indent=1,
                 )
-                # Insert at the start of the function body (after first openindent)
-                # so the unreachable code checker doesn't flag it as unreachable
-                # when the body ends with a return statement.
-                idx = funcdef.index(openindent) + 1
-                funcdef = funcdef[:idx] + if_false_yield + funcdef[idx:]
             else:
                 # new keywords here must be replicated in def_regex and handled in proc_funcdef
                 internal_assert(kwd in ("addpattern", "copyclosure"), "unknown deferred funcdef keyword", kwd)
