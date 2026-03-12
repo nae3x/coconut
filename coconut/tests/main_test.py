@@ -1194,6 +1194,13 @@ class TestCompilation(unittest.TestCase):
             ["--strict", "-c", "def f():\n    pass\n"],
         )
 
+    def test_strict_unreachable_code_yield_def(self):
+        """yield def appends compiler-generated 'if False: yield' after the body;
+        the detector should skip it because it has no source line number."""
+        call_coconut(
+            ["--strict", "-c", "yield def f(x) = x\n"],
+        )
+
     if get_bool_env_var("COCONUT_TEST_VERBOSE"):
         def test_verbose(self):
             run(["--jobs", "0", "--verbose"])
