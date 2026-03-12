@@ -284,9 +284,36 @@ The fundamental constraint is Coconut's **no-AST architecture**. All improvement
 
 ---
 
+## Phase 10: The `extract_line_num_from_comment` Bug — Detection Never Fires
+
+**Document**: [10-extract-line-num-bug.md](10-extract-line-num-bug.md)
+
+The Phase 8 (v2) fix introduced a critical bug: `detect_unreachable_code` calls `extract_line_num_from_comment(comment)` to check whether a line has a source line number (user code) or not (compiler-generated code). However, at the `deferred_code_proc` stage where the detector runs, line numbers are still in `lnwrapper` format (`‡N⏹` — Unicode markers). `extract_line_num_from_comment` only parses `# N` format (it splits on `#`). Since there is no `#` in `‡2⏹`, it always returns `None`, causing the detector to treat **every** line as compiler-generated and skip the warning.
+
+**Result**: The unreachable code detection never fires — not for `return`, not for `raise`, not for any input. The Phase 8 guard (`if raw_ln is not None`) silently swallows every warning.
+
+**Why `make test-univ` still passes**: `make test-univ` compiles `.coco` files with `--strict` and runs them. This only tests the absence of false positives, which pass vacuously since the detector never fires. The `main_test.py` positive tests (which assert detection *works*) require `pytest` and are not part of `make test-univ` — they fail when run.
+
+**Root cause**: The bug is a format mismatch introduced specifically by the Phase 8 guard. The original Phase 3 implementation had no such guard and would have fired unconditionally.
+
+---
+
+## Phase 11: Decision — Consult the Repository Owner
+
+**Document**: [11-question-for-owner.md](11-question-for-owner.md)
+
+The chain of cascading fixes — `yield def` false positive → prepend fix → broken docstrings → line number skip → wrong parser format → detection never fires — suggests the approach may need rethinking rather than another patch. Rather than continuing to add fixes on top of fixes, the decision was made to consult the repository owner (@evhub) for guidance on:
+
+1. Whether a new `lnwrapper` parser is the right fix, or whether a different mechanism to distinguish compiler-generated code from user code is preferred
+2. Whether the `keyword_funcdef_handle` append-at-bottom behavior for `if False: yield` should be preserved or changed
+3. Any other architectural concerns about the detection running in `proc_funcdef` / `deferred_code_proc`
+
+---
+
 ## Commit History
 
 ```
+9610d3fb Test addition (main_test.py) — the yield def regression test for Phase 8
 1e3bd9ba Revert yield insertion to bottom; skip unreachable warning for compiler-generated code
 ab2c5e71 Fix case detect unreachable code when yield
 80fc7af9 Remove unused documents
@@ -309,3 +336,5 @@ b259d43c Apply fix for issue 599
 | 7. Fix v1 | Prepend `if False: yield` at body top | Tests pass, but... |
 | 8. Fix v2 | Revert prepend; teach detector to skip compiler-generated code | Clean separation of concerns; docstrings preserved |
 | 9. Future work | Documented 7+ enhancements as future work | Keep scope focused; ship what works |
+| 10. Bug found | `extract_line_num_from_comment` can't parse `lnwrapper` format — detector never fires | Format mismatch introduced by Phase 8 guard |
+| 11. Pause | Cascading fixes suggest the approach may need owner input | Consult @evhub before adding another patch |
