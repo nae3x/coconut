@@ -206,15 +206,36 @@ A separate pass over the module's top-level statements, outside of `proc_funcdef
 
 ### Current limitation
 
-The `noqa_able=False` parameter means users cannot suppress the warning with `# NOQA`. This was a deliberate initial choice because at the raw-lines stage, the NOQA comment from the original source may not be reliably accessible — comments are partially processed during compilation.
+The `noqa_able=False` parameter means users cannot suppress the warning with `# NOQA`. This is **not** simply a matter of flipping the flag to `True`. The existing `has_noqa_comment(original, loc)` helper computes the line number as `lineno(loc, original)`, where `loc` is the position of the `def` statement — not the unreachable line. Setting `noqa_able=True` would check the wrong line (the `def` line) for a NOQA comment.
+
+For a detailed explanation of why the existing NOQA mechanism is incompatible with the unreachable code checker, see **[issue-599-not-support-NOQA.md](09-not-support-NOQA.md)**. That document covers:
+- How the three-component NOQA system works (`comment_handle` → `has_noqa_comment` → `strict_err_or_warn`)
+- Why `loc` (the function definition's parse location) causes `has_noqa_comment` to check the wrong line
+- Why other `noqa_able=True` checks don't have this problem (they are triggered by parse actions with token-level `loc`)
+- A proposed fix that bypasses `has_noqa_comment` and looks up `self.comments` directly by line number
+
+### What the data looks like
+
+User comments *are* available at this stage. `comment_handle` stores every parsed comment in `self.comments[ln]`, indexed by adjusted source line number. Line-number comments embedded in `raw_lines` are produced by `self.ln_comment(src_ln)` using those same adjusted numbers. Therefore `term_ln` (extracted via `extract_line_num_from_comment`) directly indexes `self.comments`.
 
 ### What would be needed
 
-1. Check whether the Coconut-embedded comment on the *unreachable line* (or the *terminator line*) contains a NOQA marker
-2. Verify that `split_comment` preserves NOQA annotations at this stage of compilation
-3. If so, change `noqa_able=False` to `noqa_able=True`
+`has_noqa_comment` cannot be used as-is. Instead, `detect_unreachable_code` must check `self.comments[term_ln]` directly, bypassing the loc-based lookup:
 
-This is low-complexity but requires testing with actual `.coco` files to verify comment preservation.
+```python
+if term_ln is not None:
+    noqa_comment = self.reformat(" ".join(self.comments[term_ln]), ignore_errors=True)
+    if self.noqa_regex.search(noqa_comment):
+        last_terminator = None
+        continue
+```
+
+The check should be applied to the **unreachable line**, not the terminator line — that is where the user would write `# NOQA`.
+
+### Caveats
+
+- Only works when `term_ln is not None`. In `-c` (string input) mode, no line-number comments are embedded so `term_ln` is always `None` — NOQA suppression would be silently unavailable in that mode.
+- `noqa_able=False` should remain on the `strict_err_or_warn` call; the NOQA check must happen earlier, inside `detect_unreachable_code` itself, before the warning is emitted.
 
 ---
 
@@ -241,21 +262,61 @@ When compiling with `-c` (string input), `extract_line_num_from_comment` returns
 | `try`/`except` all-path termination | Medium — common in error handling | High | Medium (exception coverage) | Medium |
 | `match`/`case` exhaustiveness | Covered by `if`/`else` analysis | None (free with #1) | N/A | N/A |
 | Cross-statement range reporting | N/A (UX improvement) | Low | None | Low |
+| `break`/`continue` inside loops | Low-Medium — uncommon pattern | Low-Medium | Low | Low |
 | Module-level detection | Low — rare pattern | Medium | Low | Low |
-| NOQA support | N/A (UX improvement) | Low | None | Medium |
+| NOQA support | N/A (UX improvement) | Low-Medium (cannot use existing `has_noqa_comment`; requires direct `self.comments[term_ln]` check; unavailable in `-c` mode) | None | Medium |
 | Precise line numbers | N/A (UX improvement) | Medium | None | Medium |
 
 ---
 
 ## Recommended Implementation Order
 
-1. **NOQA support** — low effort, high user-experience impact, no algorithm changes
+1. **NOQA support** — low-medium effort; requires bypassing `has_noqa_comment` and checking `self.comments[term_ln]` directly inside `detect_unreachable_code`; only works for `.coco` file compilation (not `-c` mode)
 2. **Precise line numbers** — medium effort, makes diagnostics actionable
 3. **Branch-exhaustive `if`/`else`** — the single highest-impact improvement; subsumes `match`/`case` analysis for free
 4. **`try`/`except` all-path termination** — structurally similar to #3 but with more edge cases
 5. **Cross-statement range reporting** — polish; do after the detection scope is finalized
-6. **`while True` without `break`** — niche; do if users request it
-7. **Module-level detection** — requires a new entry point; do last
+6. **`break`/`continue` inside loops** — replace flat `last_terminator` with per-level tracking; do after cross-statement reporting since it extends the same data structure
+7. **`while True` without `break`** — niche; do if users request it
+8. **Module-level detection** — requires a new entry point; do last
+
+---
+
+## 9. `break`/`continue` Within Loop Bodies
+
+### What is missed
+
+```python
+def f():
+    for i in range(10):
+        break
+        x = 2  # NOT detected
+
+def g():
+    for i in range(10):
+        continue
+        x = 2  # NOT detected
+```
+
+`x = 2` is at the same indentation level as `break`/`continue` inside the loop body — it can never execute. The current algorithm suppresses all analysis inside loops via `disabled_until_level`, so neither the terminator nor the subsequent line is ever examined.
+
+The suppression exists for a separate reason: to avoid false positives where a `return` inside a loop would make code *after* the loop appear unreachable (which it is not, since the loop may not execute). This is correct behavior for outer-scope analysis, but it accidentally suppresses valid detection of terminators *at the inner scope*.
+
+### What would be needed
+
+1. **Allow terminator detection inside loop bodies**: Instead of disabling analysis entirely inside loops, track termination state per nesting level. At each level, the same logic applies: if a `break`, `continue`, `return`, or `raise` is followed by code at the same level, that code is unreachable.
+
+2. **Preserve the outer-scope suppression**: A terminator inside a loop must not propagate its "unreachable" status to the enclosing level. A `return` inside a `for` loop does not make post-loop code unreachable — the loop body may never execute. The change is "don't propagate out of loops", not "disable analysis inside loops."
+
+3. **Per-level terminator tracking**: The single `last_terminator` variable would become a dict or list keyed by nesting level. Each level gets its own terminator state, reset independently. On dedenting out of a loop, the inner level's state is discarded rather than promoted to the outer level.
+
+### Complexity impact
+
+Low-Medium. The core change is replacing one flat `last_terminator` with a per-level structure. The detection logic itself is identical to what exists at level 1 — just applied at all levels inside loops. The main risk is correctly handling the boundary condition: clearing inner-level state when leaving a loop without affecting outer-level state.
+
+### Risk of false positives
+
+Low. `break` and `continue` are unconditional terminators within a loop iteration — any code at the same indentation level after them is always unreachable, with no edge cases from branching or exception handling.
 
 ---
 

@@ -179,7 +179,7 @@ def test_strict_unreachable_code_warning(self):
 | `for`/`while`/`try`/`with` blocks | Suppressed via `disabled_until_level` — `break`/`continue`/`return` inside loops are intentional |
 | `if`/`else` with returns in all branches | **Not detected** (by design) — the check is intentionally conservative; only unconditional top-level terminators are flagged |
 | `raise` statement | Flagged as a terminator (same as `return`) |
-| `break`/`continue` at top of function body | Rare, but flagged — they are unconditional terminators at that level |
+| `break`/`continue` at top of function body | **Not possible** — invalid Python syntax outside a loop; rejected by the parser before detection runs |
 | Pattern-matched `match def` functions | Bodies are also processed by `proc_funcdef`; generated code lines with `ln=None` are silently skipped |
 | Statement lambdas (`is_stmt_lambda=True`) | Also processed by `proc_funcdef`; detection applies correctly |
 | `pass` statement | **Not treated as a terminator** — `pass` does not prevent subsequent code from executing |
