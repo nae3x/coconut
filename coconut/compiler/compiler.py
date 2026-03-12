@@ -5318,14 +5318,18 @@ async with {iter_item} as {temp_var}:
         keywords, funcdef = tokens
         for kwd in keywords:
             if kwd == "yield":
-                funcdef += handle_indentation(
+                if_false_yield = handle_indentation(
                     """
 if False:
     yield
                     """,
                     add_newline=True,
-                    extra_indent=1,
                 )
+                # Insert at the start of the function body (after first openindent)
+                # so the unreachable code checker doesn't flag it as unreachable
+                # when the body ends with a return statement.
+                idx = funcdef.index(openindent) + 1
+                funcdef = funcdef[:idx] + if_false_yield + funcdef[idx:]
             else:
                 # new keywords here must be replicated in def_regex and handled in proc_funcdef
                 internal_assert(kwd in ("addpattern", "copyclosure"), "unknown deferred funcdef keyword", kwd)
