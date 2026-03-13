@@ -195,7 +195,6 @@ from coconut.compiler.util import (
     rem_and_count_indents,
     normalize_indent_markers,
     is_blank,
-    extract_line_num_from_comment,
     prep_grammar,
     ordered,
     tuple_str_of_str,
@@ -2649,26 +2648,20 @@ else:
             # only analyze at top level of function body, outside suppressed scopes
             if level == 1 and disabled_until_level is None and base and not is_blank(line):
                 if last_terminator is not None:
-                    # skip compiler-generated code (e.g. `if False: yield` from `yield def`)
-                    # which has no source line number comment
-                    raw_ln = extract_line_num_from_comment(comment)
-                    if raw_ln is not None:
-                        term_kwd, term_ln = last_terminator
-                        self.strict_err_or_warn(
-                            "found unreachable code after " + term_kwd + " statement",
-                            original,
-                            loc,
-                            ln=term_ln,
-                            noqa_able=False,
-                            endpoint=False,
-                        )
+                    term_kwd, term_ln = last_terminator
+                    self.strict_err_or_warn(
+                        "found unreachable code after " + term_kwd + " statement",
+                        original,
+                        loc,
+                        ln=term_ln,
+                        noqa_able=False,
+                        endpoint=False,
+                    )
                     last_terminator = None
 
                 m = self.terminator_stmt_regex.match(base)
                 if m:
-                    raw_ln = extract_line_num_from_comment(comment)
-                    term_ln = self.adjust(raw_ln) if raw_ln is not None else None
-                    last_terminator = (m.group(1), term_ln)
+                    last_terminator = (m.group(1), None)
                 else:
                     last_terminator = None
 
