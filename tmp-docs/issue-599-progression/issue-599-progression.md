@@ -4,7 +4,7 @@
 
 **Branch**: `fix-599-yield-error` (based on `master`)
 
-**Period**: ~2 weeks
+**Period**: ~3 weeks
 
 ---
 
@@ -308,6 +308,22 @@ The chain of cascading fixes — `yield def` false positive → prepend fix → 
 2. Whether the `keyword_funcdef_handle` append-at-bottom behavior for `if False: yield` should be preserved or changed
 3. Any other architectural concerns about the detection running in `proc_funcdef` / `deferred_code_proc`
 
+**Update (2026-03-20)**: It has been a week since the questions were posted (2026-03-12 → 2026-03-20) and no response has been received from @evhub. The implementation remains paused pending owner guidance.
+
+---
+
+## Phase 12: Moving Forward — Prepend `yield` After Docstring
+
+With no response from the repository owner after a week, the decision was made to proceed independently. The chosen approach revisits the Phase 7 prepend strategy but fixes the docstring problem identified in Phase 8:
+
+- **Phase 7 (v1)**: Prepended `if False: yield` at the very top of the function body → broke docstrings
+- **Phase 8 (v2)**: Reverted to appending at the bottom, added line-number guard → guard never fires due to `lnwrapper` format mismatch
+
+**New approach (v3)**: Modify `keyword_funcdef_handle` to prepend `if False: yield` at the top of the function body, but **after** any docstring. This avoids both problems:
+- Docstrings remain as the first statement → `__doc__` is preserved, PEP 257 compliance maintained
+- `if False: yield` appears before any user code → no false positive from the unreachable code detector
+- No need for the `extract_line_num_from_comment` guard that caused the Phase 10 bug
+
 ---
 
 ## Commit History
@@ -338,3 +354,4 @@ b259d43c Apply fix for issue 599
 | 9. Future work | Documented 7+ enhancements as future work | Keep scope focused; ship what works |
 | 10. Bug found | `extract_line_num_from_comment` can't parse `lnwrapper` format — detector never fires | Format mismatch introduced by Phase 8 guard |
 | 11. Pause | Cascading fixes suggest the approach may need owner input | Consult @evhub before adding another patch |
+| 12. Move forward | No response after a week; prepend `if False: yield` after docstring | Fixes both docstring (Phase 8) and format mismatch (Phase 10) problems |
